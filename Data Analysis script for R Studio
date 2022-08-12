@@ -1,0 +1,455 @@
+# SET WORKING DIRECTORY, LOAD PACKAGES AND READ IN DATA SET
+setwd("~/Documents/Postgrad/UofS/Dissertation/Data Analysis")
+library(tidyverse)
+library(MASS)
+library(reshape2)
+library(reshape)
+library(dbplyr)
+library(dplyr)
+library(plyr)
+library(tidyr)
+library(lm.beta)
+library(rms)
+library(ggplot2)
+library(lme4)
+library(pwr)
+library(rstatix)
+library(simr)
+library(beepr)
+
+chimp.data <- read_csv("Detecting Chimpanzee Emotion.csv")
+
+# RENAME COLUMNS AND DELETE QUALTRICS HEADER ROWS / UNNECCESSARY COLUMNS
+colnames(chimp.data)
+names(chimp.data)[names(chimp.data) == "D1"] <- "Age"
+names(chimp.data)[names(chimp.data) == "D2"] <- "Gender"
+names(chimp.data)[names(chimp.data) == "D4"] <- "Experience"
+names(chimp.data)[names(chimp.data) == "VIdeo8"] <- "Video8"
+  #delete header rows
+chimp.data <- chimp.data %>% slice(-c(1,2))
+  #remove excess columns
+chimp.data$StartDate <- NULL
+chimp.data$EndDate <- NULL
+chimp.data$Status <- NULL
+chimp.data$IPAddress <- NULL
+chimp.data$Progress <- NULL
+chimp.data$`Duration (in seconds)` <- NULL
+chimp.data$Finished <- NULL
+chimp.data$RecordedDate <- NULL
+chimp.data$ResponseId <- NULL
+chimp.data$RecipientLastName <- NULL
+chimp.data$RecipientFirstName <- NULL
+chimp.data$RecipientEmail <- NULL
+chimp.data$ExternalReference <- NULL
+chimp.data$LocationLatitude <- NULL
+chimp.data$LocationLongitude <- NULL
+chimp.data$DistributionChannel <- NULL
+chimp.data$UserLanguage <- NULL
+chimp.data$Q71_1 <- NULL
+chimp.data$Q71_2 <- NULL
+chimp.data$Q71_3 <- NULL
+chimp.data$Q71_4 <- NULL
+chimp.data$Q71_5 <- NULL
+chimp.data$Q71_6 <- NULL
+chimp.data$D3 <- NULL
+chimp.data$QA1_NPS_GROUP <- NULL
+chimp.data$QA2_NPS_GROUP <- NULL
+chimp.data$QA3_NPS_GROUP <- NULL
+chimp.data$QA4_NPS_GROUP <- NULL
+chimp.data$QA5_NPS_GROUP <- NULL
+chimp.data$QA6_NPS_GROUP <- NULL
+chimp.data$QA7_NPS_GROUP <- NULL
+chimp.data$QA8_NPS_GROUP <- NULL
+chimp.data$QA9_NPS_GROUP <- NULL
+chimp.data$QA10_NPS_GROUP <- NULL
+chimp.data$id <- NULL
+
+# SET CORRECT VARIABLE TYPES
+  #rename Experience column variables
+chimp.data$Experience <- gsub("No. I have never worked with non-human primates.", "No", chimp.data$Experience)
+chimp.data$Experience <- gsub("Yes. I have worked with non-human primates including chimpanzees.", "Chimps", chimp.data$Experience)
+chimp.data$Experience <- gsub("Yes. I have worked with other non-human primates not including chimpanzees.", "Other", chimp.data$Experience)
+
+  #rename Age column variable
+chimp.data$Age = as.factor(chimp.data$Age)
+chimp.data$Age <- revalue(chimp.data$Age, c("18 - 29 (or 17 - 29 if you are a University of Stirling Student)" = "18 - 29"))
+
+  #set QA columns to numeric
+cols.QA <- c("QA1","QA2","QA3","QA4","QA5","QA6","QA7","QA8","QA9","QA10")
+chimp.data[cols.QA] <- sapply(chimp.data[cols.QA], as.numeric)
+sapply(chimp.data, class)
+
+  #exclude anthropomorphism questions 6-10 (these are non-anthropomorphic control questions)
+myvars <- names(chimp.data) %in% c("QA6","QA7","QA8","QA9","QA10")
+new.data <- chimp.data[!myvars]
+
+  #excluding anthropomorphism questions (stimuli only)
+myvarsQA <- names(new.data) %in% c("QA1","QA2","QA3","QA4","QA5")
+data.stimuli <- new.data[!myvarsQA]
+
+  #excluding stimuli questions (anthropomorphism only)
+myvarsclips <- c("ID","Experience", "Age", "Gender","QA1","QA2","QA3","QA4","QA5")
+data.QA <- new.data[myvarsclips]
+
+mutate.QA <- mutate(data.QA,
+                    QA = QA1 + QA2 + QA3 + QA4 + QA5)
+
+# DATA WRANGLING
+new.data <- as.data.frame(new.data)
+class(new.data)
+molten.data <- melt(new.data, na.rm=TRUE, id = c("ID", "Experience", "Age", "Gender"))
+
+data.stimuli <- as.data.frame(data.stimuli)
+class(data.stimuli)
+molten.data.stimuli <- melt(data.stimuli, na.rm=TRUE, id = c("ID", "Experience", "Age", "Gender"))
+
+data.QA <- as.data.frame(data.QA)
+class(data.QA)
+molten.data.QA <- melt(data.QA, na.rm=TRUE, id = c("ID", "Experience", "Age", "Gender"))
+
+  #Combining stimuli and anthropomorphism total score into data set in separate columns
+molten.data.stimuli$ID=as.factor(as.character(molten.data.stimuli$ID))
+mutate.QA$ID=as.factor((as.character(mutate.QA$ID)))
+
+jointdataset <- merge(molten.data.stimuli, mutate.QA, by=c("ID","Experience","Age","Gender"), all=TRUE)
+
+myvarstotal <- names(jointdataset) %in% c("QA1","QA2","QA3","QA4","QA5")
+data.total <- jointdataset[!myvarstotal]
+
+#To avoid confusion, name the "value" column as "Answer" as it is the participant's answer (response) to each of the stimuli
+names(data.total)[names(data.total)=="value"] <- "Answer"
+names(data.total)[names(data.total)=="variable"] <- "clipname"
+#The correct valence of each clip will hereafter be termed "Valence"
+
+# Assigning correct=1 / incorrect=0 binary score to answers
+Modality = c("Audio","Video","AV")
+
+  #for Audio1-11, Video1-11, AV1-11 Negative=1
+score.table.1 <-data.frame(Modality = rep(Modality, each=11),
+                           clipno = seq(1,11, by=1),
+                           Valence = rep("Negative", each=11),
+                           Correct = rep(1, each=11))
+
+#for Audio1-11, Video1-11, AV1-11 Positive=0
+score.table.2 <-data.frame(Modality = rep(Modality, each=11),
+                           clipno = seq(1,11, by=1),
+                           Valence = rep("Positive", each=11),
+                           Correct = rep(0, each=11))
+
+#for Audio12-17, Video12-17, AV12-17, Negative=0
+score.table.3 <- data.frame(Modality = rep(Modality, each=6),
+                            clipno = seq(12,17, by=1),
+                            Valence = rep("Negative", each=6),
+                            Correct=rep(0, each=6))
+
+#for Audio12-17, Video12-17, AV12-17, Positive=1
+score.table.4 <- data.frame(Modality = rep(Modality, each=6),
+                            clipno = seq(12,17, by=1),
+                            Valence = rep("Positive", each=6),
+                            Correct=rep(1, each=6))
+
+  #bind score tables together vertically
+score.table = rbind(score.table.1, score.table.2, score.table.3, score.table.4)
+
+score.table$clipname = paste(score.table$Modality, score.table$clipno, sep = "")
+
+score.table$Valence = as.factor(score.table$Valence)
+score.table$clipname=as.factor(score.table$clipname)
+
+data.total$clipname=as.factor(data.total$clipname)
+data.total$Answer=as.factor(data.total$Answer)
+
+score.table$clipnameanswer = as.factor(paste(score.table$clipname, score.table$Valence, sep="."))
+length(levels(score.table$clipnameanswer))
+
+data.total$clipnameanswer = as.factor(paste(data.total$clipname, data.total$Answer, sep="."))
+length(levels(data.total$clipnameanswer))
+
+keeps = c("clipnameanswer", "Correct", "Modality", "clipno")
+score.table = score.table[keeps]
+data_set <- merge(data.total, score.table, by=c("clipnameanswer"), all=TRUE)
+
+#Add the correct valence answers
+#For Audio1-11, Video1-11, AV1-11 all are really Negative
+valence.table.1 <- data.frame(Modality = rep(Modality, each=11),
+                              clipno = seq(1,11, by=1),
+                              Valence = rep("Negative", each=11))
+
+#For Audio12-17, Video12-17, AV12-17 all are really Positive
+valence.table.2 <- data.frame(Modality = rep(Modality, each=6),
+                              clipno = seq(12,17, by=1),
+                              Valence = rep("Positive", each=6))
+valence.table = rbind(valence.table.1, valence.table.2)
+valence.table$clipname = paste(valence.table$Modality, valence.table$clipno, sep="")
+keeps = c("clipname","Valence")
+valence.table=valence.table[keeps]
+
+#Merge the real info on valence into main data
+data_set = merge(data_set, valence.table, by="clipname", all=TRUE)
+summarycheck = ddply(data_set, .(Valence,clipname), 
+                     summarise, 
+                     meancorrect=mean(Correct))
+summarycheck
+
+# PLOT
+  #demographic information and histograms
+#Experience
+ggplot(chimp.data, aes(Experience)) +
+  geom_bar() +
+  theme_classic() +
+  xlab("Experience") +
+  ylab("Number of Participants") +
+  ggtitle("Experience Histogram")
+
+#Age
+ggplot(chimp.data, aes(Age)) +
+  geom_bar() +
+  theme_classic() +
+  xlab("Participant Age") +
+  ylab("Number of Participants") +
+  ggtitle("Age Histogram")
+
+#Anthropomorphism
+hist(mutate.QA$QA, main="Histogram of IDAQ Results", xlab="Participant IDAQ Score")
+ggplot(mutate.QA, aes(QA)) +
+  geom_bar() +
+  theme_classic() +
+  xlab("Participant IDAQ Score") +
+  ylab("Number of Participants") +
+  ggtitle("Anthropomorphism Score Histogram")
+
+#Disambiguate participant IDs by renaming one of them with new ID
+levels(as.factor(data_set$ID))
+length(levels(as.factor(data_set$ID)))
+
+data_set$IDnew = as.character(data_set$ID)
+data_set$IDnew[which(data_set$ID == "274899" & data_set$Gender == "Nonbinary")] = "274899A"
+
+levels(as.factor(data_set$IDnew))
+length(levels(as.factor(data_set$IDnew)))
+
+  #plotting the data
+summary1 = ddply(data_set, .(Modality, Experience), summarise,
+                n = length(!is.na(Correct)),
+                no.correct = sum(Correct))
+summary1$percentage.correct = (summary1$no.correct/summary1$n)*100
+summary1
+
+  # for stimuli summary table
+summary.clipno = ddply(data_set, .(clipno), summarise,
+                 n = length(!is.na(Correct)),
+                 no.correct = sum(Correct))
+summary.clipno$percentage.correct = (summary.clipno$no.correct/summary.clipno$n)*100
+summary.clipno
+
+# How many do people get correct? Are they better than chance?
+  #In data_set how many valence=pos and valence=neg are there?
+summary2 = ddply(data_set, .(IDnew, Valence),
+                 summarise,
+                 n = length(IDnew))
+summary2
+
+summary3 = ddply(data_set, .(IDnew, Answer),
+                 summarise,
+                 n = length(IDnew))
+summary3
+
+#How many does each participant get correct?
+personperrow = ddply(data_set, .(IDnew, Modality, Experience),
+                     summarise,
+                     n = length(!is.na(Correct)),
+                     no.correct = sum(Correct),
+                     meancorrect = mean(Correct))
+personperrow$percentage.correct = (personperrow$no.correct/personperrow$n)*100
+personperrow
+
+hist(personperrow$percentage.correct, main="Histogram of Correct Scores", xlab="Percentage Scored Correctly", ylab="Number of Participants")
+
+#Are people doing above chance on average? One-sample t-test to test if mean percent correct differs from 50
+t.test(personperrow$percentage.correct, mu=50, alternative = "two.sided")
+
+  # Modality
+personmodalityrow = ddply(data_set, .(IDnew, Modality, Experience),
+                          summarise,
+                          n - length(!is.na(Correct)),
+                          no.correct = sum(Correct),
+                          meancorrect = mean(Correct))
+personmodalityrow$percentage.correct = (personmodalityrow$no.correct / personmodalityrow$n)*100
+personmodalityrow
+
+  # Valence
+personvalencerow = ddply(data_set, .(IDnew, Valence), 
+                         summarise,
+                         n = length(!is.na(Correct)),
+                         no.correct = sum(Correct))
+personvalencerow$percentage.correct = (personvalencerow$no.correct / personvalencerow$n)*100
+personvalencerow
+
+#MODALITY/EXPERIENCE PLOT WITH ERROR BARS
+summary_error = ddply(data_set, .(Modality, Experience), summarise,
+                      n = length(!is.na(Correct)),
+                      mean.correct = mean(Correct)*100,
+                      sd = sd(Correct),
+                      no.correct = sum(Correct))
+summary_error$percentage.correct = (summary_error$no.correct/summary_error$n)*100
+summary_error$se = (summary_error$sd / sqrt(summary_error$n))*100
+summary_error
+
+ggplot(summary_error, aes(x=factor(Experience), y=mean.correct)) +
+  geom_bar(stat="identity", position=position_dodge(), colour="black") +
+  scale_fill_manual(values=c("red","purple","blue")) +
+  facet_wrap(~Modality) +
+  theme(axis.text.x = element_text(angle=90, hjust=1)) +
+  xlab("Participant Experience Group") +
+  ylab("Percentage of Correct Identification of Valence") +
+  ggtitle("Data Results for Stimuli Condition and Participant Experience") +
+  geom_errorbar(aes(ymin=mean.correct-se, ymax=mean.correct+se), width=0.2, position=position_dodge(0.9))
+
+#summary of just experience
+summary_exp = ddply(data_set, .(Experience), summarise,
+                      n = length(!is.na(Correct)),
+                      mean.correct = mean(Correct)*100,
+                      sd = sd(Correct),
+                      no.correct = sum(Correct))
+summary_exp$percentage.correct = (summary_exp$no.correct/summary_exp$n)*100
+summary_exp$se = (summary_exp$sd / sqrt(summary_exp$n))*100
+summary_exp
+
+#Anthropomorphism
+#Summary as above but for IDAQ Score
+summary.QA = ddply(data_set, .(IDnew), summarise,
+                   QA = max(QA),
+                   n = length(!is.na(Correct)),
+                   no.correct = sum(Correct))
+summary.QA$percentage.correct = (summary.QA$no.correct/summary.QA$n)*100
+summary.QA
+
+ggplot(summary.QA, aes(x=QA, y=percentage.correct)) +
+  geom_point() +
+  stat_smooth(method="lm", se=TRUE) +
+  theme(axis.text.x = element_text(angle=90, hjust=1)) +
+  xlab("IDAQ Score") +
+  ylab("Percentage of Correct Identification of Valence") +
+  ggtitle("Data Results for Anthropomorphsim")
+
+# ANALYSIS
+# GENERALISED LINEAR MIXED MODEL WITH BINOMIAL ERROR
+data_set$Modality = as.factor(data_set$Modality)
+levels(data_set$Modality)
+
+#New and improved Random Effects structure
+#Create ClipNo variable - one category for each clip used to create stimuli (there are 17 clips across both POS and NEG)
+data_set$clipname <- as.character(data_set$clipname)
+data_set$ClipNo = parse_number(data_set$clipname)
+data_set$ClipNo = as.factor(data_set$ClipNo)
+levels(data_set$ClipNo)
+
+#Create StimulusNo variable - one category for each stimulus (i.e., 3x17 clips = 51 levels)
+data_set$StimulusNo = data_set$clipname
+data_set$StimulusNo = as.factor(data_set$StimulusNo)
+levels(data_set$StimulusNo)
+
+#Now trying with updated Random Effects structure:
+m1 <- glmer(Correct ~ factor(Modality) +
+               (1|IDnew) + (1|ClipNo/StimulusNo),
+             data = data_set, family=binomial)
+summary(m1)
+drop1(m1, test="Chisq")
+
+#Now try with more complex model with multiple Fixed Effects terms
+m1.interaction <- glmer(Correct ~ factor(Modality) + factor(Valence) +
+                           factor(Modality)*factor(Valence) +
+                           (1|IDnew) + (1|ClipNo/StimulusNo),
+                         data=data_set, family=binomial)
+summary(m1.interaction)
+drop1(m1.interaction, test="Chisq") 
+
+#Drop interaction term to test significance of main effect terms
+m1.a <- glmer(Correct ~ factor(Modality) + factor(Valence) +
+               (1|IDnew) + (1|ClipNo/StimulusNo),
+             data=data_set, family=binomial)
+summary(m1.a)
+drop1(m1.a, test="Chisq") 
+
+#Plot this
+#first count up correct answers for each participant (to get measure of spread across participants in nect step)
+data_set$Valence = as.factor(data_set$Valence)
+summary1 = ddply(data_set, .(IDnew, Valence, Modality), summarise,
+                 n = length(!is.na(Correct)),
+                 no.correct = sum(Correct))
+summary1$proportioncorrect = summary1$no.correct/summary1$n
+summary1
+
+#now summarise for valence and modality
+summary2 = ddply(summary1, .(Valence, Modality), summarise,
+                 mean = (mean(proportioncorrect))*100,
+                 sd = sd(proportioncorrect),
+                 nparticipants = length(proportioncorrect))
+summary2$se = (summary2$sd / sqrt(summary2$nparticipants))*100
+summary2
+
+#plot means
+ggplot(data=summary2, aes(x=Valence, y=mean, fill=Modality)) +
+  geom_bar(stat="identity", position=position_dodge(), colour="black") +
+  scale_fill_manual(values=c("red","purple","blue")) +
+  ylab("Percentage of Correct Identification of Valence") +
+  ggtitle("Data Results for Modality and Valence") +
+  geom_errorbar(aes(ymin=mean-se, ymax=mean+se), width=0.2, position=position_dodge(0.9))
+
+#Valence
+summary_valence = ddply(summary1, .(Valence), summarise,
+                 mean = (mean(proportioncorrect))*100,
+                 sd = sd(proportioncorrect),
+                 nparticipants = length(proportioncorrect))
+summary_valence$se = (summary_valence$sd / sqrt(summary_valence$nparticipants))*100
+summary_valence
+
+#Post-hoc test to confirm that people do best with audio clip of positive valence (as looks like from plot)
+subsetPOS = subset(data_set, data_set$valence=="Positive")
+levels(droplevels(subsetPOS$Valence))
+m3 <- glmer(Correct ~ factor(Modality) +
+              (1|IDnew) + (1|ClipNo/StimulusNo),
+            data=subsetPOS, family=binomial)
+summary(m3)
+drop1(m3, test="Chisq")
+
+subsetNEG = subset(data_set, data_set$Valence=="Negative")
+levels(droplevels(subsetNEG$Valence))
+
+m4 <- glmer(Correct ~ factor(Modality) +
+              (1|IDnew) + (1|ClipNo/StimulusNo),
+            data=subsetNEG, family=binomial)
+summary(m4)
+drop1(m4, test="Chisq")
+
+#For Hypothesis 3
+summary.exp = ddply(data_set, .(Experience), summarise,
+                n = length(!is.na(Correct)),
+                no.correct = sum(Correct))
+summary.exp$percentage.correct= (summary.exp$no.correct/summary.exp$n)*100
+summary.exp
+m2 <- glmer(Correct ~ Experience +
+              (1|IDnew) + (1|ClipNo/StimulusNo),
+          data = data_set, family = binomial)
+summary(m2)
+drop1(m2, test="Chisq")
+
+  #Exploratory test for interaction between Experience and Anthropomorphism 
+  m2.interaction <-glmer(Correct ~ Experience + QA + Experience*QA +
+                           (1|IDnew) + (1|ClipNo/StimulusNo),
+                       data = data_set, family = binomial)
+  summary(m2.interaction)
+  drop1(m2.interaction, test="Chisq")
+  #test significance of main effect by removing interaction term
+  m2.interaction.a <-glmer(Correct ~ Experience + QA +
+                             (1|IDnew) + (1|ClipNo/StimulusNo),
+                         data = data_set, family = binomial)
+  summary(m2.interaction.a)
+  drop1(m2.interaction.a, test="Chisq")
+
+#For Hypothesis 4
+m3 <- glmer(Correct ~ QA +
+              (1|IDnew) + (1|ClipNo/StimulusNo), 
+          data = data_set, family = binomial)
+summary(m3)
+drop1(m3, test="Chisq")
